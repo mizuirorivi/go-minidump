@@ -3,32 +3,22 @@ package main
 import (
 	"fmt"
 	"go-minidump/pkgs/dump"
-	"os"
-	"strconv"
+	pasrses "go-minidump/pkgs/parses"
 )
 
 func usage() {
 	fmt.Println("Usage: minidump <PID> <DumpFile>")
 }
 func main() {
-	if len(os.Args) < 3 {
-		usage()
-		panic("[-]Error not enough arguments")
-	}
-	pid, err := strconv.Atoi(os.Args[1])
-	if err != nil {
-		usage()
-		panic("[-]Error converting PID to int")
-	}
-	DumpFile := os.Args[2]
-	if DumpFile == "" {
-		usage()
-		panic("[-]Error DumpFile is empty")
-	}
-	d := dump.DumpState{
-		ProcessID: pid,
-		FileName:  DumpFile,
+	f := pasrses.Parse()
+	d := dump.DumperState{
+		ProcessID:   f.ProcessID,
+		FileName:    f.FileName,
+		ProcessName: f.ProcessName,
 	}
 
-	d.Run()
+	err := d.Dump()
+	if err != nil {
+		panic(err)
+	}
 }
