@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -14,8 +15,8 @@ const (
 )
 
 var (
-	dbghelp, _           = syscall.LoadLibrary("dbghelp.dll")
-	MiniDumpWriteDump, _ = syscall.GetProcAddress(dbghelp, "MiniDumpWriteDump")
+	MiniDumpWriteDump uintptr
+	err               error
 )
 
 type Dumper interface {
@@ -29,6 +30,21 @@ type DumperState struct {
 	DumpFile      *os.File
 }
 
+func init() {
+	dbghelp, err := syscall.LoadLibrary("dbghelp.dll")
+	if err != nil {
+		fmt.Printf("Error loading dbghelp.dll: %v\n", err)
+		return
+	}
+
+	MiniDumpWriteDump, err = syscall.GetProcAddress(dbghelp, "MiniDumpWriteDump")
+	if err != nil {
+		fmt.Printf("Error getting MiniDumpWriteDump procedure address: %v\n", err)
+		syscall.FreeLibrary(dbghelp)
+		return
+	}
+
+}
 func (d *DumperState) Dump() error {
 	if err := d.createFile(); err != nil {
 		return err
@@ -64,14 +80,20 @@ func (d *DumperState) createFile() error {
 
 func (d *DumperState) openProcess(priority uint32) error {
 	const (
-		PROCESS_QUERY_INFORMATION = 0x0400
-		PROCESS_VM_READ           = 0x0010
+		STANDARD_RIGHTS_REQUIRED = 0x000F0000
+		SYNCHRONIZE              = 0x00100000
+		PROCESS_ALL_ACCESS       = (STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0xFFFF)
 	)
+
+	if err := enableDebugPrivilege(); err != nil {
+		return fmt.Errorf("failed to enable SeDebugPrivilege: %v", err)
+	}
+
 	kernel32 := syscall.NewLazyDLL("kernel32.dll")
 	procOpenProcess := kernel32.NewProc("OpenProcess")
 
 	handle, _, _ := procOpenProcess.Call(
-		PROCESS_QUERY_INFORMATION|PROCESS_VM_READ,
+		uintptr(PROCESS_ALL_ACCESS),
 		0,
 		uintptr(d.ProcessID),
 	)
@@ -81,6 +103,35 @@ func (d *DumperState) openProcess(priority uint32) error {
 	}
 
 	d.ProcessHandle = windows.Handle(handle)
+	return nil
+}
+
+func enableDebugPrivilege() error {
+	var luid windows.LUID
+	if err := windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr("SeDebugPrivilege"), &luid); err != nil {
+		return err
+	}
+
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES, &token); err != nil {
+		return err
+	}
+	defer token.Close()
+
+	tokenPrivileges := windows.Tokenprivileges{
+		PrivilegeCount: 1,
+		Privileges: [1]windows.LUIDAndAttributes{
+			{
+				Luid:       luid,
+				Attributes: windows.SE_PRIVILEGE_ENABLED,
+			},
+		},
+	}
+
+	if err := windows.AdjustTokenPrivileges(token, false, &tokenPrivileges, uint32(unsafe.Sizeof(tokenPrivileges)), nil, nil); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -110,25 +161,21 @@ func (d *DumperState) writeMiniDump() error {
 		MiniDumpWithFullMemory = 2 // argument of MiniDumpWriteDump for full dump
 	)
 
-	ret, _, callErr := syscall.Syscall9(
-		uintptr(MiniDumpWriteDump),
-		uintptr(7),
+	dbg := syscall.NewLazyDLL("dbghelp.dll")
+	mini := dbg.NewProc("MiniDumpWriteDump")
 
+	handle, _, _ := mini.Call(
 		uintptr(d.ProcessHandle),
 		uintptr(d.ProcessID),
 		uintptr(d.DumpFile.Fd()),
-		uintptr(2),
+		uintptr(MiniDumpWithFullMemory),
 		uintptr(0),
 		uintptr(0),
 		uintptr(0),
-		0, 0,
 	)
-	if callErr != 0 {
-		return fmt.Errorf("error calling MiniDumpWriteDump: %w", callErr)
-	}
 
-	if int(ret) == 0 {
-		return fmt.Errorf("MiniDumpWriteDump returned 0")
+	if handle == 0 {
+		return fmt.Errorf("[-]error opening process")
 	}
 
 	return nil
