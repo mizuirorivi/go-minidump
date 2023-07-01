@@ -18,7 +18,7 @@ func usage() {
 }
 func Parse() *Flag {
 	f := &Flag{}
-	flag.StringVar(&f.FileName, "f", "dump.dmp", "File name to dump")
+	flag.StringVar(&f.FileName, "f", "", "File name to dump")
 	flag.IntVar(&f.ProcessID, "p", 0, "Process ID to dump")
 	flag.StringVar(&f.ProcessName, "n", "", "Process name to dump")
 	flag.Parse()

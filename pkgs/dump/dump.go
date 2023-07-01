@@ -3,6 +3,7 @@ package dump
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"syscall"
 	"unsafe"
 
@@ -10,51 +11,33 @@ import (
 )
 
 const (
-	PROCESS_ALL_ACCESS        = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0xffff
-	SizeofProcessEntry32 uint = 568
-)
-
-var (
-	MiniDumpWriteDump uintptr
-	err               error
+	STANDARD_RIGHTS_REQUIRED = 0x000F0000
+	SYNCHRONIZE              = 0x00100000
+	PROCESS_ALL_ACCESS       = (STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0xFFFF)
 )
 
 type Dumper interface {
 	Dump() error
 }
 type DumperState struct {
-	FileName      string
-	ProcessID     int
-	ProcessName   string
-	ProcessHandle windows.Handle
-	DumpFile      *os.File
+	FileName      string         // dump file name
+	ProcessID     int            // process id
+	ProcessName   string         // process name
+	ProcessHandle windows.Handle // process handle
+	DumpFile      *os.File       // file handle for dump
 }
 
-func init() {
-	dbghelp, err := syscall.LoadLibrary("dbghelp.dll")
-	if err != nil {
-		fmt.Printf("Error loading dbghelp.dll: %v\n", err)
-		return
-	}
-
-	MiniDumpWriteDump, err = syscall.GetProcAddress(dbghelp, "MiniDumpWriteDump")
-	if err != nil {
-		fmt.Printf("Error getting MiniDumpWriteDump procedure address: %v\n", err)
-		syscall.FreeLibrary(dbghelp)
-		return
-	}
-
-}
 func (d *DumperState) Dump() error {
-	if err := d.createFile(); err != nil {
-		return err
-	}
 	defer d.close()
 
 	if d.ProcessID == 0 {
 		if err := d.getProcessId(); err != nil {
 			return err
 		}
+	}
+
+	if err := d.createFile(); err != nil {
+		return err
 	}
 
 	if err := d.openProcess(windows.ABOVE_NORMAL_PRIORITY_CLASS); err != nil {
@@ -65,11 +48,15 @@ func (d *DumperState) Dump() error {
 		return err
 	}
 
-	fmt.Println("[+]Dump successful")
+	fmt.Println("[+]Dump successful -> ", d.FileName)
 	return nil
 }
 
 func (d *DumperState) createFile() error {
+	// define default file name
+	if d.FileName == "" {
+		d.FileName = d.ProcessName + "_" + strconv.Itoa(d.ProcessID) + ".dmp"
+	}
 	file, err := os.Create(d.FileName)
 	if err != nil {
 		return fmt.Errorf("error creating file: %w", err)
@@ -79,11 +66,6 @@ func (d *DumperState) createFile() error {
 }
 
 func (d *DumperState) openProcess(priority uint32) error {
-	const (
-		STANDARD_RIGHTS_REQUIRED = 0x000F0000
-		SYNCHRONIZE              = 0x00100000
-		PROCESS_ALL_ACCESS       = (STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0xFFFF)
-	)
 
 	if err := enableDebugPrivilege(); err != nil {
 		return fmt.Errorf("failed to enable SeDebugPrivilege: %v", err)
@@ -92,14 +74,14 @@ func (d *DumperState) openProcess(priority uint32) error {
 	kernel32 := syscall.NewLazyDLL("kernel32.dll")
 	procOpenProcess := kernel32.NewProc("OpenProcess")
 
-	handle, _, _ := procOpenProcess.Call(
+	handle, _, callerr := procOpenProcess.Call(
 		uintptr(PROCESS_ALL_ACCESS),
 		0,
 		uintptr(d.ProcessID),
 	)
 
 	if handle == 0 {
-		return fmt.Errorf("[-]error opening process")
+		return fmt.Errorf("[-]error opening process: %v", callerr)
 	}
 
 	d.ProcessHandle = windows.Handle(handle)
@@ -138,14 +120,18 @@ func enableDebugPrivilege() error {
 func (d *DumperState) getProcessId() error {
 	snapshot, err := syscall.CreateToolhelp32Snapshot(syscall.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
-		return fmt.Errorf("error creating toolhelp32 snapshot: %w", err)
+		return fmt.Errorf("[-]error creating toolhelp32 snapshot: %w", err)
 	}
 	defer syscall.CloseHandle(snapshot)
 
 	var entry syscall.ProcessEntry32
-	entry.Size = uint32(SizeofProcessEntry32)
+	entry.Size = uint32(unsafe.Sizeof(entry))
 
 	err = syscall.Process32First(snapshot, &entry)
+	if err != nil {
+		return fmt.Errorf("[-]error getting first process: %w", err)
+	}
+
 	for err == nil {
 		if syscall.UTF16ToString(entry.ExeFile[:]) == d.ProcessName {
 			d.ProcessID = int(entry.ProcessID)
@@ -161,10 +147,10 @@ func (d *DumperState) writeMiniDump() error {
 		MiniDumpWithFullMemory = 2 // argument of MiniDumpWriteDump for full dump
 	)
 
-	dbg := syscall.NewLazyDLL("dbghelp.dll")
-	mini := dbg.NewProc("MiniDumpWriteDump")
+	dbghelp := syscall.NewLazyDLL("dbghelp.dll")
+	MiniDumpWriteDump := dbghelp.NewProc("MiniDumpWriteDump")
 
-	handle, _, _ := mini.Call(
+	handle, _, _ := MiniDumpWriteDump.Call(
 		uintptr(d.ProcessHandle),
 		uintptr(d.ProcessID),
 		uintptr(d.DumpFile.Fd()),
