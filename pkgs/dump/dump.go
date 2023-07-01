@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -55,7 +56,8 @@ func (d *DumperState) Dump() error {
 func (d *DumperState) createFile() error {
 	// define default file name
 	if d.FileName == "" {
-		d.FileName = d.ProcessName + "_" + strconv.Itoa(d.ProcessID) + ".dmp"
+		f := d.ProcessName + "_" + strconv.Itoa(d.ProcessID)
+		d.FileName = strings.ReplaceAll(f, ".", "_") + ".dmp"
 	}
 	file, err := os.Create(d.FileName)
 	if err != nil {
