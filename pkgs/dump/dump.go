@@ -83,8 +83,11 @@ func (d *DumperState) openProcess(priority uint32) error {
 	)
 
 	if handle == 0 {
-		return fmt.Errorf("[-]error opening process: %v", callerr)
+		err := windows.GetLastError()
+		errMsg := err.Error()
+		return fmt.Errorf("[-]Error opening process: %v, %v", errMsg, callerr)
 	}
+		
 
 	d.ProcessHandle = windows.Handle(handle)
 	return nil
@@ -163,7 +166,7 @@ func (d *DumperState) writeMiniDump() error {
 	)
 
 	if handle == 0 {
-		return fmt.Errorf("[-]error opening process")
+		return fmt.Errorf("[-]error calling MiniDumpWriteDump: %v", handle)
 	}
 
 	return nil
